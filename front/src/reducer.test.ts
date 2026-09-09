@@ -91,6 +91,18 @@ test("重复送达的 durable 事件被忽略", () => {
   expect(state.turns[0].items.length).toBe(1);
 });
 
+// turn.started 和 state.changed 一样是"一轮开始"的权威信号。快照总是
+// IDLE，如果只靠后者，快照加载后立刻发消息会被误判成运行中注入，界面上
+// 既不显示真身也不显示排队替身。
+test("turn.started 将状态切到等待模型", () => {
+  const state = reduce(initialState, {
+    type: "event",
+    event: durable(1, "turn.started", null),
+  });
+
+  expect(state.runState).toBe("WAITING_MODEL");
+});
+
 test("工具调用的输出片段按顺序累积", () => {
   const call = { id: "call-1", name: "bash", arguments: { command: "ls" } };
   let state = reduce(initialState, {

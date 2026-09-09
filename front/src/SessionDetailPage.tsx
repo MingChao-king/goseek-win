@@ -347,7 +347,7 @@ export function SessionDetailPage() {
         throw failure;
       }
     },
-    [id, busy, runCommand, openFiles],
+    [id, runCommand, openFiles],
   );
 
   /** handleCancel 中止当前这一轮。会话继续存在，之后还能接着聊。 */
@@ -1287,6 +1287,17 @@ const browserSpecialKeys = new Set([
   "Home", "End", "PageUp", "PageDown",
 ]);
 
+const purePrintableAscii = /^[\x20-\x7E]+$/;
+
+/**
+ * WKWebView 切换输入源时会强制提交拼音预编辑串，并带上 IME 分段空格
+ * （"uuhu" -> "uu hu"）。真正的英文输入不会把整段原始拼音与空格一起
+ * 作为一个 composition 事件提交，因此这里用它区分异常提交。
+ */
+function isAbandonedImeAsciiBuffer(data: string): boolean {
+  return purePrintableAscii.test(data) && data.includes(" ") && data.trim() !== "";
+}
+
 function BrowserSurface({
   sessionID, targetID, title,
 }: {
@@ -1305,6 +1316,7 @@ function BrowserSurface({
   const [loaded, setLoaded] = useState(false);
   const [zoomMode, setZoomMode] = useState<"fit" | number>("fit");
   const [appliedScale, setAppliedScale] = useState(1);
+  const composingRef = useRef(false);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -1472,13 +1484,34 @@ function BrowserSurface({
         className="browser-keyboard-capture"
         aria-label="向当前页面输入"
         value=""
+        onCompositionStart={() => {
+          composingRef.current = true;
+        }}
+        onCompositionEnd={(event) => {
+          composingRef.current = false;
+          const text = event.currentTarget.value;
+          event.currentTarget.value = "";
+          if (!text) return;
+          const normalized = isAbandonedImeAsciiBuffer(text)
+            ? text.replace(/\s+/g, "")
+            : text;
+          void browserInsertText(sessionID, targetID, normalized);
+        }}
         onChange={(event) => {
+          // 切换输入源时，WebKit 可能先触发一次携带整个预编辑串的 change，
+          // 随后才触发 compositionend。这里必须等组合结束再统一发送，
+          // 否则页面会收到 "uu hu"，紧接着又收到规范化后的 "uuhu"。
+          if (
+            composingRef.current ||
+            (event.nativeEvent instanceof InputEvent && event.nativeEvent.isComposing)
+          ) return;
           if (event.target.value) {
             void browserInsertText(sessionID, targetID, event.target.value);
           }
         }}
         onKeyDown={(event) => {
           if (!browserSpecialKeys.has(event.key)) return;
+          if (composingRef.current || event.nativeEvent.isComposing) return;
           event.preventDefault();
           void browserPressKey(sessionID, targetID, event.key);
         }}

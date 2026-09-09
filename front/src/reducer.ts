@@ -304,6 +304,7 @@ function nextChangedFiles(current: string[], event: RunEvent): string[] {
 
 /** nextRunState 返回事件之后的运行状态。 */
 function nextRunState(current: RunState, event: RunEvent): RunState {
+  if (event.type === "turn.started") return "WAITING_MODEL";
   if (event.type !== "state.changed") return current;
   return stateOf(event.payload) ?? current;
 }
