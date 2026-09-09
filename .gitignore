@@ -1,4 +1,5 @@
 node_modules/
 backend/release/
+backend/cmd/goseek/plugins/browser/bin/
 *.log
 .DS_Store
