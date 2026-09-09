@@ -1,0 +1,7 @@
+{
+  "name": "file-links",
+  "display_name": "File Links",
+  "version": "0.1.0",
+  "description": "教模型在修改文件后给出可点击的链接",
+  "author": "GoSeek"
+}

@@ -1,0 +1,7 @@
+{
+  "name": "browser",
+  "display_name": "Browser",
+  "version": "0.1.0",
+  "description": "视觉浏览器操作：截屏给模型看，模型用坐标操作页面",
+  "author": "GoSeek"
+}

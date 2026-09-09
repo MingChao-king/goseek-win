@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GoSeek</title>
+    <script>
+      // 首帧前同步应用主题：等 React 挂载再写 data-theme，会先闪一帧默认配色。
+      // 逻辑与 src/theme.ts 同一份约定；这里必须无依赖、同步、可失败静默。
+      (function () {
+        try {
+          var theme = localStorage.getItem("goseek.theme");
+          if (theme === "light" || theme === "dark" || theme === "claude") {
+            document.documentElement.dataset.theme = theme;
+          }
+        } catch (_) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <!-- React 把整个界面渲染进这一个空 div 里。index.html 从头到尾只有这一个
+         挂载点，其余全部由 JavaScript 生成。 -->
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
