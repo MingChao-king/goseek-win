@@ -223,6 +223,99 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   border-color: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 .session-item.current::before { height: 60%; }
+
+/* ---- 侧栏"正在运行"提醒 -----------------------------------------------------
+   多会话并行时用户最常见的误会是"我以为它跑完了"或"我不知道它还在跑"。
+   这里的设计目标：不点开会话，也能从列表上一眼看出哪个会话模型还在处理、
+   跑到了哪一步；同时不过度打扰——动画全部限定在小元素上。 */
+
+/* 卡片：呼吸光晕 + 微弱的边框提亮。动画走 box-shadow（不引发重排）。 */
+.session-item.session-running {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  animation: session-running-glow 2.4s ease-in-out infinite;
+}
+@keyframes session-running-glow {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent); }
+  50%      { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent); }
+}
+
+/* 左缘竖条在运行期间加长并随呼吸轻微变亮，与 current 的高亮互不冲突：
+   current 用背景块区分"我在看哪"，这里用动画区分"谁在跑"。 */
+.session-item.session-running::before {
+  height: 60%;
+  animation: session-running-edge 2.4s ease-in-out infinite;
+}
+@keyframes session-running-edge {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+/* 标题前的实时状态点：思考中/执行中/整理中各有自己的颜色与动画节奏。
+   思考是最容易被误报为"空闲"的阶段，给它最明显的脉动。 */
+.session-running-dot {
+  flex: none; display: inline-block;
+  width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 0.4rem; vertical-align: 1px;
+}
+.session-running-dot.step-waiting_model {
+  background: var(--accent);
+  animation: running-dot-pulse 1.1s ease-in-out infinite;
+}
+.session-running-dot.step-running_tool {
+  background: #2c6b3c;
+  animation: running-dot-pulse 0.7s ease-in-out infinite;
+}
+.session-running-dot.step-compressing {
+  background: #8a6714;
+  animation: running-dot-pulse 1.6s ease-in-out infinite;
+}
+@keyframes running-dot-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%      { transform: scale(0.55); opacity: 0.5; }
+}
+
+/* meta 行里的步骤徽标：替代"几分钟前"的位置——运行中的会话，用户关心的是
+   "跑到哪一步"而不是"几分钟前活动过"。 */
+.session-running-badge {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  color: var(--accent);
+}
+.session-running-badge::after {
+  content: ""; display: inline-block;
+  width: 3px; height: 3px; border-radius: 50%;
+  background: currentColor;
+  animation: running-badge-ellipsis 1.2s ease-in-out infinite;
+}
+@keyframes running-badge-ellipsis {
+  0%, 100% { opacity: 0.2; }
+  50%      { opacity: 1; }
+}
+
+/* 品牌行下的汇总提示：有任一会话在跑时才出现。 */
+.sidebar-running-hint {
+  display: flex; align-items: center; gap: 0.45rem;
+  margin: 0 0.15rem 0.6rem; padding: 0.32rem 0.55rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: 8px; background: color-mix(in srgb, var(--accent-soft) 62%, transparent);
+  color: var(--accent); font-size: 0.78rem; font-weight: 500;
+}
+.sidebar-running-hint-dot {
+  flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent);
+  animation: running-dot-pulse 1.1s ease-in-out infinite;
+}
+
+/* 用户声明了减弱动态效果时：保留全部信息（边框提亮、徽标、置顶），
+   只去掉动画。呼吸和脉动对前庭敏感的用户是负担，颜色与布局不变。 */
+@media (prefers-reduced-motion: reduce) {
+  .session-item.session-running,
+  .session-item.session-running::before,
+  .session-running-dot,
+  .session-running-badge::after,
+  .sidebar-running-hint-dot {
+    animation: none;
+  }
+}
 .session-title {
   font-weight: 550; font-size: 0.92rem;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

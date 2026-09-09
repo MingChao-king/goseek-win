@@ -106,6 +106,16 @@ type Runner struct {
 	// 因为它们并发改写 session.Memory。
 	running atomic.Bool
 
+	// turnState 是当前这一轮进行到了哪一步（WAITING_MODEL / RUNNING_TOOL /
+	// COMPRESSING），供侧栏与快照回答"哪个会话正在跑、跑到哪一步"。
+	//
+	// 它必须独立于事件流存在：思考阶段（reasoning delta）不产生 state.changed，
+	// 只看事件流的话，页面切走再切回来就会把一个明明在思考的会话显示成"空闲"。
+	// 取值是 domain.RunState，用原子量读写——写者是跑 Agent 的子 goroutine，
+	// 读者是 HTTP 夹在请求里的任意 goroutine。空闲时取值为空串：running=false
+	// 已经回答了"在不在跑"，这里只负责"跑到了哪一步"。
+	turnState atomic.Value
+
 	// turnMutex 保护 cancelTurn 与 pending：两者都被两侧访问——HTTP 处理器的
 	// goroutine（取消、投递）和主循环／子 goroutine（设置、取走）。
 	turnMutex sync.Mutex
@@ -238,7 +248,6 @@ func NewRunner(
 		newModel:             newModel,
 		defaultModel:         defaultModel,
 		defaultContextWindow: defaultContextWindow,
-		agent:                agent.New(client, tools, sessions, hub, client, contextWindow),
 		hub:                  hub,
 		logger:               logger.With("session_id", string(sessionID)),
 		ctx:                  ctx,
@@ -246,6 +255,10 @@ func NewRunner(
 		commands:             make(chan command),
 		stopped:              make(chan struct{}),
 	}
+	// agent 的 sink 用 turnStateSink 包装 hub：它转发全部事件，额外把
+	// state.changed 记进 runner.turnState（见该类型注释）。必须在 runner
+	// 构造完成之后再装配——包装器要拿着 runner 的指针才能写入它的字段。
+	runner.agent = agent.New(client, tools, sessions, runner.turnStateSink(hub), client, contextWindow)
 
 	runner.agent.SetWindowErrorParser(model.ContextWindowFromError)
 	// 工具产出的图片落进会话图片存储：截图等观察成为会话事实，前端可以直接渲染。
@@ -585,7 +598,7 @@ func (runner *Runner) setModel(modelName string) error {
 	if err != nil {
 		return err
 	}
-	runner.agent = agent.New(client, tools, runner.store, runner.hub, client, entry.ContextWindow)
+	runner.agent = agent.New(client, tools, runner.store, runner.turnStateSink(runner.hub), client, entry.ContextWindow)
 	runner.agent.SetImageStore(
 		filepath.Join(runner.dataDirectory, "images"),
 		runner.store.SaveImage,
@@ -821,4 +834,47 @@ func replaceBuiltinExecutable(target string, data []byte) error {
 		return err
 	}
 	return os.Rename(tempPath, target)
+}
+
+// turnStateSink 把 hub 包成会维护 runner.turnState 的 EventSink。
+//
+// 为什么要拦一道：事件流是"发生过什么"的流水，而侧栏和快照需要的是"此刻在做什么"。
+// state.changed 经过这里时顺带把答案记进 turnState，之后任何时刻来问（running
+// 端点、快照）都能拿到与真实执行同步的答案，不需要翻事件历史去推断。
+//
+// 包装只在转发之外多一次原子写，不改变事件的顺序、内容与失败语义——事件推送
+// 失败不能影响 Agent 的结果，这条底线由 hub 本身保证，这里同样不破坏它。
+func (runner *Runner) turnStateSink(sink agent.EventSink) agent.EventSink {
+	return &turnStateRecorder{runner: runner, wrapped: sink}
+}
+
+// turnStateRecorder 是 turnStateSink 的实现。
+type turnStateRecorder struct {
+	runner  *Runner
+	wrapped agent.EventSink
+}
+
+// Emit 转发事件给底层 sink；state.changed 事件额外更新 runner.turnState。
+func (recorder *turnStateRecorder) Emit(event domain.RunEvent) {
+	if event.Type == domain.EventStateChanged {
+		var payload domain.StateChangedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err == nil {
+			recorder.runner.turnState.Store(payload.State)
+		}
+	}
+	recorder.wrapped.Emit(event)
+}
+
+// TurnState 返回当前轮进行到的步骤。没有轮在跑时返回空串——"在不在跑"由
+// running 回答，这里只回答"跑到了哪一步"。
+func (runner *Runner) TurnState() domain.RunState {
+	if !runner.running.Load() {
+		return ""
+	}
+	if state, ok := runner.turnState.Load().(domain.RunState); ok {
+		return state
+	}
+	// 轮已经占住但第一条 state.changed 还没到：它一开跑就会写入 WAITING_MODEL，
+	// 这个间隙按"等待模型"报告是诚实且无歧义的。
+	return domain.StateWaitingModel
 }

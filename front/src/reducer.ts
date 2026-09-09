@@ -189,7 +189,9 @@ function fromSnapshot(snapshot: SessionSnapshot): SessionState {
   });
   return {
     turns,
-    runState: "IDLE",
+    // 初始运行状态来自快照：思考阶段不产生 state.changed 事件，事件流重放救
+    // 不了它——"思考中切走再切回显示空闲"就出在这里。?? 兜底对付旧后端。
+    runState: snapshot.run_state ?? "IDLE",
     lastSequence: snapshot.last_sequence,
     workspace: snapshot.workspace,
     // 占用来自快照（后端现算）。这一条是补上的：原来这里写的是 null，理由是

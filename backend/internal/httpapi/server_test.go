@@ -700,3 +700,99 @@ func TestPathTraversalNeverReachesAHandler(t *testing.T) {
 		t.Fatal("路径穿越请求返回了 200")
 	}
 }
+
+// TestRunningSessionsEndpointAndSnapshotState 钉住侧栏"正在运行"提醒的数据源：
+//
+//  1. 一轮在跑时，GET /api/v1/sessions/running 列出它并给出当前步骤；
+//  2. 同一瞬间的会话快照带 run_state——思考阶段不产生 state.changed 事件，
+//     快照不带状态的话，用户切走再切回会看到"明明在跑却显示空闲"；
+//  3. 轮结束后两者都回到"没有运行中"。
+//
+// fakeModel 的 block 字段让第一次 Complete 停在半路，正好制造一个可观察的
+// "运行中"窗口。
+func TestRunningSessionsEndpointAndSnapshotState(t *testing.T) {
+	fake := &fakeModel{
+		responses: []domain.ModelResponse{{Content: "回复"}},
+		block:     make(chan struct{}),
+		started:   make(chan struct{}),
+	}
+	ts := newTestServer(t, fake)
+	sessionID := ts.createSession(t)
+
+	// 发一条消息：一轮开始，模型调用停在 block 上。
+	status, _ := ts.do(t, http.MethodPost, "/api/v1/sessions/"+sessionID+"/turns",
+		`{"content":"跑慢一点"}`)
+	if status != http.StatusAccepted {
+		t.Fatalf("提交返回 %d，要 %d", status, http.StatusAccepted)
+	}
+	select {
+	case <-fake.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("模型调用没有开始")
+	}
+
+	// 1) running 端点列出这个会话，状态是等待模型（第一条 state.changed 已发出）。
+	_, rawRunning := ts.do(t, http.MethodGet, "/api/v1/sessions/running", "")
+	body := string(rawRunning)
+	var running struct {
+		Running []runningSessionView `json:"running"`
+	}
+	if err := json.Unmarshal([]byte(body), &running); err != nil {
+		t.Fatalf("running 响应不是合法 JSON: %v", err)
+	}
+	if len(running.Running) != 1 {
+		t.Fatalf("运行中的会话数 = %d，要 1（响应: %s）", len(running.Running), body)
+	}
+	if running.Running[0].ID != sessionID {
+		t.Fatalf("运行中的会话 id = %s，要 %s", running.Running[0].ID, sessionID)
+	}
+	if running.Running[0].State != domain.StateWaitingModel {
+		t.Fatalf("运行状态 = %q，要 %q", running.Running[0].State, domain.StateWaitingModel)
+	}
+
+	// 2) 快照带同样的状态。注意这里不能真的"切走再切回"——重点是快照本身携带。
+	status, raw := ts.do(t, http.MethodGet, "/api/v1/sessions/"+sessionID, "")
+	if status != http.StatusOK {
+		t.Fatalf("快照返回 %d", status)
+	}
+	var snapshot struct {
+		RunState domain.RunState `json:"run_state"`
+	}
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatalf("快照不是合法 JSON: %v", err)
+	}
+	if snapshot.RunState != domain.StateWaitingModel {
+		t.Fatalf("快照 run_state = %q，要 %q", snapshot.RunState, domain.StateWaitingModel)
+	}
+
+	// 放行模型调用，等这一轮收尾。
+	close(fake.block)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, rawNow := ts.do(t, http.MethodGet, "/api/v1/sessions/running", "")
+		body := string(rawNow)
+		var after struct {
+			Running []runningSessionView `json:"running"`
+		}
+		_ = json.Unmarshal([]byte(body), &after)
+		if len(after.Running) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("轮结束 5 秒后仍有 %d 个会话在 running 列表里", len(after.Running))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// 3) 结束后的快照不再带运行状态（omitted/空串）。
+	_, raw = ts.do(t, http.MethodGet, "/api/v1/sessions/"+sessionID, "")
+	var idle struct {
+		RunState domain.RunState `json:"run_state"`
+	}
+	if err := json.Unmarshal(raw, &idle); err != nil {
+		t.Fatalf("结束后的快照不是合法 JSON: %v", err)
+	}
+	if idle.RunState != "" && idle.RunState != domain.StateIdle {
+		t.Fatalf("结束后的 run_state = %q，要空或 IDLE", idle.RunState)
+	}
+}

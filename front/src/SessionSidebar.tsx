@@ -11,19 +11,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { deleteSession, listModels, listSessions, updateSession } from "./api";
+import { deleteSession, listModels, listRunningSessions, listSessions, updateSession } from "./api";
 import { Icon } from "./Icon";
 import { loadTheme, saveTheme, themeNames, themeOrder, type Theme } from "./theme";
 import { NewSessionModal } from "./NewSessionModal";
 import { SkillsPanel } from "./SkillsPanel";
 import { PluginsPanel } from "./PluginsPanel";
 import { MCPPanel } from "./MCPPanel";
-import type { ModelInfo } from "./types";
+import type { ModelInfo, RunState } from "./types";
 import { matchSessions } from "./filter";
 import type { SessionSummary } from "./types";
 
 /** 列表自动刷新的间隔。取 10 秒：够跟上"最后活动"的变化，又不至于成为噪音。 */
 const refreshInterval = 10_000;
+
+/**
+ * 运行状态轮询的间隔。取 2 秒：运行中的会话必须"一眼就发现"，10 秒的列表刷新
+ * 太慢——用户在别的会话里发完消息，切回来时提醒应该已经在闪了。端点是纯内存
+ * 读取，2 秒一次没有成本。
+ */
+const runningPollInterval = 2_000;
 
 export function SessionSidebar() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -47,6 +54,8 @@ export function SessionSidebar() {
   // 当前打开的会话 id，从路由里取，用来高亮。
   const { id: currentID } = useParams();
   const navigate = useNavigate();
+  // 正在运行的会话：id → 当前步骤。由下面的轮询维护，与列表合并出提醒。
+  const [running, setRunning] = useState<Map<string, RunState>>(new Map());
   /** filterBox 供 Cmd/Ctrl+K 聚焦。 */
   const filterBox = useRef<HTMLInputElement>(null);
 
@@ -74,6 +83,31 @@ export function SessionSidebar() {
   useEffect(() => {
     void refresh();
   }, [currentID, refresh]);
+
+  // 轮询"哪些会话正在跑"。独立于列表刷新：它要快（2 秒），列表要慢（10 秒）。
+  // 请求失败就维持上一次的结果——侧栏提醒是锦上添花，不值得为它报错。
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const body = await listRunningSessions();
+        if (cancelled) return;
+        const next = new Map<string, RunState>();
+        for (const item of body.running) {
+          next.set(item.id, item.state);
+        }
+        setRunning(next);
+      } catch {
+        // 服务暂时不可达：保持旧值，下一轮再试。
+      }
+    }
+    void poll();
+    const timer = setInterval(() => void poll(), runningPollInterval);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -131,7 +165,27 @@ export function SessionSidebar() {
   }, []);
 
   /** visible 是过滤之后要显示的会话。过滤规则见 filter.ts。 */
-  const visible = useMemo(() => matchSessions(sessions, filter), [sessions, filter]);
+  const matched = useMemo(() => matchSessions(sessions, filter), [sessions, filter]);
+
+  /**
+   * 运行中的会话浮到列表顶部，其余保持"最后活动"倒序。
+   *
+   * 多会话并行时用户的第一个问题是"哪个还在跑"——把它们钉在最上面，答案永远
+   * 在视线最先到达的位置。运行中的几个之间仍按最后活动排序，不因为先后提交
+   * 而跳动。
+   */
+  const visible = useMemo(() => {
+    const withState = matched.map((session) => ({
+      session,
+      runState: running.get(session.id) ?? null,
+    }));
+    const active = withState.filter((entry) => entry.runState !== null);
+    const idle = withState.filter((entry) => entry.runState === null);
+    return [...active, ...idle];
+  }, [matched, running]);
+
+  /** runningCount 是运行中的会话数，给品牌行下的汇总提示。 */
+  const runningCount = useMemo(() => running.size, [running]);
 
   /** archive 归档或取消归档。 */
   async function archive(session: SessionSummary) {
@@ -194,6 +248,15 @@ export function SessionSidebar() {
         </button>
       </div>
 
+      {runningCount > 0 && (
+        <div className="sidebar-running-hint" role="status">
+          <span className="sidebar-running-hint-dot" aria-hidden="true" />
+          {runningCount === 1
+            ? "1 个会话正在运行"
+            : `${runningCount} 个会话正在运行`}
+        </div>
+      )}
+
       <div className="sidebar-scroll">
       <input
         ref={filterBox}
@@ -236,7 +299,7 @@ export function SessionSidebar() {
       )}
 
       <ul className="session-list">
-        {visible.map((session) => (
+        {visible.map(({ session, runState }) => (
           // key 用会话 id 而不是数组下标：下标会随排序变化（列表按最后活动倒序），
           // 导致 React 把状态错配到别的项上。
           <li key={session.id} className="session-row">
@@ -252,14 +315,24 @@ export function SessionSidebar() {
                   to={`/sessions/${session.id}`}
                   className={`session-item${session.id === currentID ? " current" : ""}${
                     session.archived ? " archived" : ""
-                  }`}
+                  }${runState ? " session-running" : ""}`}
+                  aria-current={runState ? "true" : undefined}
                 >
                   <div className="session-title">
+                    {runState && (
+                      <span className={`session-running-dot step-${runState.toLowerCase()}`} aria-hidden="true" />
+                    )}
                     {session.archived && <span className="archived-tag">已归档</span>}
                     {session.title}
                   </div>
                   <div className="session-meta">
-                    <span>{formatTime(session.updated_at)}</span>
+                    {runState ? (
+                      <span className="session-running-badge">
+                        {describeRunning(runState)}
+                      </span>
+                    ) : (
+                      <span>{formatTime(session.updated_at)}</span>
+                    )}
                     <span>{session.message_count} 条</span>
                   </div>
                   <div className="session-workspace" title={session.workspace}>
@@ -381,6 +454,24 @@ function RenameBox({
       />
     </form>
   );
+}
+
+/**
+ * describeRunning 把运行步骤翻译成侧栏徽标上的中文。
+ *
+ * 与详情页徽标的不同口径：侧栏空间小、不看耗时，只回答"跑到哪一步"。
+ */
+function describeRunning(state: RunState): string {
+  switch (state) {
+    case "WAITING_MODEL":
+      return "思考中";
+    case "RUNNING_TOOL":
+      return "执行中";
+    case "COMPRESSING":
+      return "整理中";
+    default:
+      return "运行中";
+  }
 }
 
 /** formatTime 把 RFC3339 时间渲染成"几分钟前"这类相对描述。 */

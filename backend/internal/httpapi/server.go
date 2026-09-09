@@ -105,6 +105,7 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sessions", server.createSession)
 	//列出会话
 	mux.HandleFunc("GET /api/v1/sessions", server.listSessions)
+	mux.HandleFunc("GET /api/v1/sessions/running", server.listRunningSessions)
 	//根据id拿到对话
 	mux.HandleFunc("GET /api/v1/sessions/{id}", server.getSession)
 	//一轮对话的开始
@@ -901,6 +902,47 @@ func (server *Server) listSessions(writer http.ResponseWriter, request *http.Req
 	writeJSON(writer, http.StatusOK, listSessionsResponse{Sessions: items})
 }
 
+// runningSessionView 是一个正在运行的会话的线上形态：只带侧栏提醒需要的字段。
+type runningSessionView struct {
+	ID string `json:"id"`
+	// State 是当前轮进行到的步骤（WAITING_MODEL / RUNNING_TOOL / COMPRESSING）。
+	State domain.RunState `json:"state"`
+}
+
+// listRunningSessions 返回此刻有轮在跑的会话。
+//
+// 给侧栏回答"哪个会话正在运行"。它只扫 runners 现有成员、绝不创建 Runner：
+// 创建一个 Runner 意味着打开数据库、抢会话文件锁、恢复上次中断——一次轮询
+// 就该是一次纯内存读取，把那些重活留给用户真正打开会话的那一刻。
+func (server *Server) listRunningSessions(writer http.ResponseWriter, request *http.Request) {
+	server.mutex.Lock()
+	entries := make([]*Runner, 0, len(server.runners))
+	for _, runner := range server.runners {
+		entries = append(entries, runner)
+	}
+	// runner 的状态是原子量，锁外读安全；map 的增删才需要 server.mutex。
+	server.mutex.Unlock()
+
+	items := make([]runningSessionView, 0, len(entries))
+	for _, runner := range entries {
+		state := runner.TurnState()
+		if state == "" {
+			continue // 不在跑的不进列表
+		}
+		items = append(items, runningSessionView{ID: string(runner.sessionID), State: state})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"running": items})
+}
+
+// existingRunner 返回已存在的 Runner（只读，不创建）。会话没有 Runner 时返回 nil。
+//
+// 快照想知道"这一刻有没有轮在跑"，但它不该为一个附带信息把整个 Runner 建起来。
+func (server *Server) existingRunner(id domain.SessionID) *Runner {
+	server.mutex.Lock()
+	defer server.mutex.Unlock()
+	return server.runners[id]
+}
+
 // getSession 返回一个会话的快照：元信息加全部消息，以及当前的事件序号。
 //
 // 前端拿它渲染完整历史，再从 last_sequence 往后订阅实时事件，中间不重不漏。
@@ -939,6 +981,12 @@ func (server *Server) getSession(writer http.ResponseWriter, request *http.Reque
 	}
 	entry, _ := model.Lookup(modelName)
 	thresholds := contextmgr.NewThresholds(entry.ContextWindow)
+	// 快照瞬间的运行状态：会话恰好有 Runner 在跑就如实带上，前端据此显示
+	// "思考中/执行中"而不是误报空闲。空闲时是零值，由 omitempty 省略，旧前端不受影响。
+	snapshotRunState := domain.RunState("")
+	if runner := server.existingRunner(session.ID); runner != nil {
+		snapshotRunState = runner.TurnState()
+	}
 	writeJSON(writer, http.StatusOK, sessionSnapshot{
 		ID:           string(session.ID),
 		Workspace:    session.Workspace,
@@ -948,6 +996,7 @@ func (server *Server) getSession(writer http.ResponseWriter, request *http.Reque
 		Messages:     messages,
 		Memory:       newMemoryView(session.Memory),
 		Usage:        domain.NewContextUsagePayload(usage),
+		RunState:     snapshotRunState,
 		Model:        modelName,
 		ModelInfo: modelInfoView{
 			Name:                   entry.Name,

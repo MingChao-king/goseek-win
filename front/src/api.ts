@@ -3,7 +3,9 @@
 // 集中的好处是错误处理只写一遍：后端的错误统一是 {"error":{"code","message"}}，
 // 由 request 一处翻译成 JS 的异常，组件里就只需要 try/catch，不必每处都判 res.ok。
 
-import type { MemoryTree, ModelInfo, SessionSnapshot, SessionSummary } from "./types";
+import type {
+  MemoryTree, ModelInfo, RunningSession, SessionSnapshot, SessionSummary,
+} from "./types";
 
 /** ApiFailure 是一次失败的请求。 */
 export class ApiFailure extends Error {
@@ -55,6 +57,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
  */
 export function listSessions(includeArchived = false): Promise<{ sessions: SessionSummary[] }> {
   return request(`/api/v1/sessions${includeArchived ? "?include_archived=1" : ""}`);
+}
+
+/**
+ * listRunningSessions 返回此刻有轮在跑的会话及其步骤。
+ *
+ * 给侧栏的"正在运行"提醒用。响应很小（最多几十条、每条两个字段），轮询成本低；
+ * 端点本身只做内存读取，服务端零 I/O。
+ */
+export function listRunningSessions(): Promise<{ running: RunningSession[] }> {
+  return request("/api/v1/sessions/running");
 }
 
 /**

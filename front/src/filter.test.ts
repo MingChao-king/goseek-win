@@ -8,7 +8,7 @@ function session(id: string, title: string, workspace: string): SessionSummary {
   return {
     id, title, workspace,
     message_count: 0, updated_at: "",
-    archived: false, custom_title: false,
+    archived: false, custom_title: false, running_state: null,
     model: "",
   };
 }

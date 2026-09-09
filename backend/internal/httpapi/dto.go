@@ -67,6 +67,12 @@ type sessionSnapshot struct {
 	Model string `json:"model"`
 	// ModelInfo 是模型的窗口信息，避免前端再从模型列表里反查。
 	ModelInfo modelInfoView `json:"model_info"`
+	// RunState 是快照瞬间的运行状态。省略（空串）表示空闲。
+	//
+	// 它必须进快照，和 usage/memory 同一个理由：事件流只从 last_sequence 之后
+	// 订阅，而思考阶段（reasoning）不产生 state.changed 事件——不带这个字段，
+	// 用户在模型思考期间切走再切回，就会看到一个明明在跑的会话显示"空闲"。
+	RunState domain.RunState `json:"run_state,omitempty"`
 }
 
 // modelInfoView 是模型窗口信息的线上形态。

@@ -399,3 +399,33 @@ test("旧后端没有 usage 字段时按空处理", () => {
 
   expect(reduce(initialState, { type: "snapshot", snapshot }).usage).toBeNull();
 });
+
+
+test("快照 run_state：思考中切走再切回不再是空闲", () => {
+    const snapshot: SessionSnapshot = {
+      id: "ses_x", workspace: "/tmp", created_at: "", updated_at: "",
+      last_sequence: 1, messages: [], memory: { raw_compaction_cursor: 1, active_batches: [], total_batches: 0 },
+      usage: {
+        context_window: 128000, input_tokens: 1200, remaining: 126800,
+        ratio: 0.009375, source: "estimated",
+      },
+      model: "", model_info: testModelInfo, run_state: "WAITING_MODEL",
+    };
+    const state = reduce(initialState, { type: "snapshot", snapshot });
+    expect(state.runState).toBe("WAITING_MODEL");
+});
+
+test("快照不带 run_state 时保持 IDLE（旧后端兼容）", () => {
+    const snapshot: SessionSnapshot = {
+      id: "ses_x", workspace: "/tmp", created_at: "", updated_at: "",
+      last_sequence: 1, messages: [], memory: { raw_compaction_cursor: 1, active_batches: [], total_batches: 0 },
+      usage: {
+        context_window: 128000, input_tokens: 1200, remaining: 126800,
+        ratio: 0.009375, source: "estimated",
+      },
+      model: "", model_info: testModelInfo,
+    };
+    const state = reduce(initialState, { type: "snapshot", snapshot });
+    expect(state.runState).toBe("IDLE");
+});
+

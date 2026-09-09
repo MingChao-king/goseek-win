@@ -5,6 +5,13 @@
 // 一旦后端改了字段名，这里必须跟着改，否则编译通过但运行时拿到 undefined。
 
 /** 会话列表里的一项。 */
+/** 一个正在运行的会话：侧栏"正在运行"提醒的数据单元。 */
+export interface RunningSession {
+  id: string;
+  /** 当前轮进行到的步骤（思考中 / 执行中 / 整理上下文）。 */
+  state: RunState;
+}
+
 export interface SessionSummary {
   id: string;
   title: string;
@@ -18,6 +25,14 @@ export interface SessionSummary {
   archived: boolean;
   /** 标题是用户自己起的，不是从首条消息派生的。 */
   custom_title: boolean;
+  /**
+   * 这个会话此刻是否有轮在跑。null 表示不在跑。
+   *
+   * 它由侧栏定时轮询 /api/v1/sessions/running 合并进来（服务端不把它放进列表
+   * 响应：运行状态瞬息万变，让它跟着列表的 10 秒刷新走会显得迟钝）。侧栏用它
+   * 画"正在运行"的提醒——多会话并行时，哪个会话模型还在处理必须一眼可见。
+   */
+  running_state: RunState | null;
 }
 
 /** 一次工具调用。 */
@@ -63,6 +78,13 @@ export interface SessionSnapshot {
    */
   last_sequence: number;
   messages: Message[];
+  /**
+   * 快照瞬间的运行状态；缺省（旧后端）按空闲处理。
+   *
+   * 思考阶段（reasoning）不产生 state.changed 事件，事件流重放救不了它——
+   * "思考中切走再切回显示空闲"就出在这里，所以它必须由快照显式携带。
+   */
+  run_state?: RunState;
   /**
    * 这个会话的压缩现状。
    *
