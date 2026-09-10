@@ -195,7 +195,10 @@ func (server *Server) defaultWorkspaceHandler(writer http.ResponseWriter, reques
 }
 
 // getSessionFile 返回会话 workspace 内的一个文本文件内容，供侧栏点击文件查看。
-// 路径必须是 workspace 内的相对路径（防路径穿越），文件大小限制 1 MB。
+// 路径优先按 workspace 相对/绝对解析（防穿越）；workspace 外的绝对路径不读内容，
+// 但仍返回结构化载荷（binary + abs_path）让前端渲染文件卡片——模型给的链接可以
+// 指向 workspace 之外（隔壁仓库、下载目录），用户点它要的是"去看看这个文件"，
+// 不是一句"不存在"。文件大小限制 1 MB。
 func (server *Server) getSessionFile(writer http.ResponseWriter, request *http.Request) {
 	sessionID := domain.SessionID(request.PathValue("id"))
 	runner, err := server.runnerFor(sessionID)
@@ -210,9 +213,45 @@ func (server *Server) getSessionFile(writer http.ResponseWriter, request *http.R
 	}
 	// 防路径穿越 + 符号链接归一：/tmp 是 /private/tmp 的别名，对话里的 file://
 	// 链接与 workspace 可能各用一种形式，字符串前缀比较会误判。
-	absPath, ok := resolveWithinWorkspace(runner.session.Workspace, relPath)
-	if !ok {
-		writeError(writer, http.StatusForbidden, "path_outside_workspace", "路径超出工作目录范围")
+	absPath, inside := resolveWithinWorkspace(runner.session.Workspace, relPath)
+	if !inside {
+		// workspace 之外的绝对路径：只在"绝对路径且能定位到真实文件/目录"时
+		// 放行为只读卡片。相对路径拒绝——相对就意味着约定在 workspace 里，
+		// 解析不到即视为无效；绝对路径越界一律拒绝 ../ 穿越（Abs+Clean 已消掉）。
+		if !filepath.IsAbs(filepath.Clean(relPath)) {
+			writeError(writer, http.StatusForbidden, "path_outside_workspace", "路径超出工作目录范围")
+			return
+		}
+		cleaned := filepath.Clean(relPath)
+		if info, err := os.Stat(cleaned); err != nil || info.IsDir() {
+			// 越界且也不存在：按不存在给卡片（abs_path 是真实绝对路径，
+			// 定位按钮能打开它所在的目录）。
+			writeJSON(writer, http.StatusNotFound, fileViewPayload{
+				Path:     relPath,
+				AbsPath:  cleaned,
+				NotFound: true,
+				Size:     -1,
+			})
+			return
+		}
+		// 越界但存在：只读卡片（binary=true → 不读内容），定位到真实位置。
+		outInfo, outErr := os.Stat(cleaned)
+		if outErr != nil || outInfo.IsDir() {
+			writeJSON(writer, http.StatusNotFound, fileViewPayload{
+				Path:     relPath,
+				AbsPath:  cleaned,
+				NotFound: true,
+				Size:     -1,
+			})
+			return
+		}
+		writeJSON(writer, http.StatusOK, fileViewPayload{
+			Path:       relPath,
+			AbsPath:    cleaned,
+			Binary:     true,
+			Size:       outInfo.Size(),
+			ModifiedAt: outInfo.ModTime(),
+		})
 		return
 	}
 	info, err := os.Stat(absPath)
@@ -293,22 +332,30 @@ func resolveWithinWorkspace(workspace, raw string) (string, bool) {
 	return "", false
 }
 
-// resolveSymlinksBestEffort 解析路径中的符号链接；路径本身不存在时对最近的
-// 已存在祖先解析，剩余部分原样拼回。
+// resolveSymlinksBestEffort 解析路径中的符号链接；路径本身不存在时，对最近的
+// 已存在祖先解析，再把**从未解析成功的尾段原样拼回**。
+//
+// 必须拼回完整尾段而不是只拼最后一段：EvalSymlinks 失败只说明"这段路径还不存在"，
+// 不代表它是一层目录。丢掉中间段会把 release/x.zip 解析成 x.zip——文件被查到
+// 别的地方，"不存在"的结论就是错的。真实踩过：安装包 zip 刚生成、工作区快照
+// 之间的一瞬，这个函数曾经把不存在的路径悄悄换成了错误的路径。
 func resolveSymlinksBestEffort(path string) string {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		return resolved
 	}
-	dir := filepath.Dir(path)
+	// 从完整路径出发，找到最深的已存在祖先；记录从未解析成功的尾段。
+	segments := []string{}
+	current := path
 	for {
-		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-			return filepath.Join(resolved, filepath.Base(path))
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(append([]string{resolved}, segments...)...)
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
+		dir, base := filepath.Split(current)
+		if dir == "" {
 			return path
 		}
-		dir = parent
+		segments = append([]string{base}, segments...)
+		current = filepath.Clean(dir)
 	}
 }
 
@@ -358,8 +405,14 @@ func (server *Server) revealFile(writer http.ResponseWriter, request *http.Reque
 	}
 	absPath, ok := resolveWithinWorkspace(runner.session.Workspace, body.Path)
 	if !ok {
-		writeError(writer, http.StatusForbidden, "path_outside_workspace", "路径超出工作目录范围")
-		return
+		// workspace 外：接受绝对路径（模型链接常指向隔壁目录），拒绝相对路径。
+		// 定位操作只是替用户打开文件管理器并选中——不泄露内容、不执行任何东西，
+		// 它能到达的范围本来就等于用户自己在 Finder 里点到的范围。
+		if !filepath.IsAbs(filepath.Clean(body.Path)) {
+			writeError(writer, http.StatusForbidden, "path_outside_workspace", "路径超出工作目录范围")
+			return
+		}
+		absPath = filepath.Clean(body.Path)
 	}
 
 	var command *exec.Cmd

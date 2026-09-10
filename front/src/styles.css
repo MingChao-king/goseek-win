@@ -1864,3 +1864,11 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   border: 1px solid var(--border); cursor: pointer;
 }
 .btn-secondary:hover { background: var(--bg-soft); }
+
+/* 文件卡片的目录路径行与"打开所在目录"按钮的文字部分。 */
+.file-card-dir {
+  font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl;
+}
+.reveal-label { font-size: 0.78rem; }

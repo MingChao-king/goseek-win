@@ -192,6 +192,34 @@ export function RevealButton({ path, sessionID }: { path: string; sessionID: str
   );
 }
 
+/**
+ * RevealParentButton 只打开文件所在的目录（不要求文件存在）。
+ *
+ * not_found 场景的主力动作：文件本身可能还没生成/已被删，但它该在的目录
+ * 大概率在——去目录里看一眼是用户此刻真正想要的。后端 reveal 对不存在的
+ * 文件也能打开其父目录（见该端点注释），这里只是把入口显式给出来。
+ */
+export function RevealParentButton({ path, sessionID }: { path: string; sessionID: string }) {
+  const [failed, setFailed] = useState(false);
+  const reveal = useCallback(async () => {
+    try {
+      // 复用 reveal 端点：macOS open -R / Windows explorer /select 对"目录部分
+      // 存在、文件不存在"的路径会打开父目录，这正是想要的行为。
+      await revealFile(sessionID, path);
+      setFailed(false);
+    } catch {
+      setFailed(true);
+      window.setTimeout(() => setFailed(false), 2000);
+    }
+  }, [sessionID, path]);
+  return (
+    <button className="link icon-btn" title="打开所在目录" onClick={() => void reveal()}>
+      {failed ? <Icon name="alert" size={13} /> : <Icon name="folder" size={13} />}
+      <span className="reveal-label">打开所在目录</span>
+    </button>
+  );
+}
+
 /** CodeFile 是带行号与轻量着色的代码视图。 */
 function CodeFile({ code, language }: { code: string; language: string }) {
   const lines = useMemo(() => code.split("\n"), [code]);
@@ -218,6 +246,8 @@ function CodeFile({ code, language }: { code: string; language: string }) {
 function FileCard({ payload, sessionID }: { payload: FilePayload; sessionID: string }) {
   const isMissing = !!payload.not_found;
   const name = payload.path.split("/").pop() || payload.path;
+  // 完整路径展示：文件名可能重复（多个 release/x.zip），用户需要知道它该在哪。
+  const dir = payload.abs_path.slice(0, Math.max(0, payload.abs_path.length - name.length));
   return (
     <div className="file-view">
       <div className="file-card">
@@ -225,21 +255,26 @@ function FileCard({ payload, sessionID }: { payload: FilePayload; sessionID: str
           <Icon name="file" size={22} />
         </div>
         <div className="file-card-name" title={payload.abs_path}>{name}</div>
+        <div className="file-card-dir" title={payload.abs_path}>{dir}</div>
         <div className="file-card-meta">
           {isMissing
-            ? "文件当前不存在（可能已被删除，或还没生成）"
+            ? "文件当前不存在——可能还没生成，或已被移动/删除"
             : payload.binary
               ? `${formatSize(payload.size)} · 无法在侧栏预览`
               : formatSize(payload.size)}
         </div>
         <div className="file-card-actions">
-          {!isMissing || payload.abs_path ? (
+          {isMissing ? (
+            // 缺失文件的主动作是"去它该在的目录看看"——比在文件管理器里
+            // 选中一个不存在的文件更符合用户此刻的意图。
+            <RevealParentButton path={payload.abs_path} sessionID={sessionID} />
+          ) : (
             <RevealButton path={payload.abs_path} sessionID={sessionID} />
-          ) : null}
+          )}
           <CopyButton text={payload.abs_path} className="link icon-btn" />
         </div>
         <div className="file-card-hint">
-          {isMissing ? "打开所在目录看看" : "在文件管理器中显示 · 复制路径"}
+          {isMissing ? "到它该在的位置看一眼 · 复制完整路径" : "在文件管理器中显示 · 复制路径"}
         </div>
       </div>
     </div>
