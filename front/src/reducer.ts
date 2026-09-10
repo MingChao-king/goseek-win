@@ -118,7 +118,7 @@ export interface SessionState {
   memory: SessionMemory;
   /** 当前模型的窗口信息。 */
   modelInfo: ModelInfo;
-  /** 本轮会话中被 write_file 修改过的文件路径列表。 */
+  /** 最近一轮交互中被 write_file 修改过的文件路径列表。 */
   changedFiles: string[];
 }
 
@@ -205,24 +205,9 @@ function fromSnapshot(snapshot: SessionSnapshot): SessionState {
     // 之后订阅，刷新页面后不会重放到它们。
     memory: snapshot.memory ?? emptyMemory,
     modelInfo: snapshot.model_info ?? initialState.modelInfo,
-    changedFiles: collectChangedFiles(snapshot.messages),
+    // 快照里都是历史；「本轮改动」只描述接下来发生的一轮，从空开始。
+    changedFiles: [],
   };
-}
-
-/** collectChangedFiles 从快照消息中提取 write_file 调用过的路径（去重、按时间顺序）。 */
-function collectChangedFiles(messages: Message[]): string[] {
-  const paths: string[] = [];
-  for (const message of messages) {
-    if (message.role !== "assistant") continue;
-    for (const call of message.tool_calls ?? []) {
-      if (call.name !== "write_file") continue;
-      try {
-        const args = JSON.parse(String(call.arguments)) as { path?: string };
-        if (args.path && !paths.includes(args.path)) paths.push(args.path);
-      } catch { /* 参数不是合法 JSON 就跳过 */ }
-    }
-  }
-  return paths;
 }
 
 /** appendSnapshotMessage 把一条历史消息还原成界面片段。 */
@@ -295,6 +280,7 @@ function applyEvent(state: SessionState, event: RunEvent): SessionState {
 
 /** nextChangedFiles 记录 write_file 工具修改过的文件路径。 */
 function nextChangedFiles(current: string[], event: RunEvent): string[] {
+  if (event.type === "turn.started") return [];
   if (event.type !== "file.changed") return current;
   const payload = event.payload;
   if (typeof payload !== "object" || payload === null || !("path" in payload)) return current;

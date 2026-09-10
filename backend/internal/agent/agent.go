@@ -331,7 +331,7 @@ func (agent *Agent) registerToolImages(result *domain.ToolResult, sessionID doma
 		return fmt.Errorf("创建工具图片目录失败: %w", err)
 	}
 	registered := make([]domain.MessageImage, 0, len(result.Images))
-	for index, source := range result.Images {
+	for _, source := range result.Images {
 		if source.FilePath == "" {
 			continue
 		}
@@ -339,23 +339,24 @@ func (agent *Agent) registerToolImages(result *domain.ToolResult, sessionID doma
 		if err != nil {
 			return fmt.Errorf("读取工具图片 %s 失败: %w", source.FilePath, err)
 		}
+		mediaType := sniffImageMediaType(source.MediaType, source.FilePath, data)
+		if mediaType == "" {
+			return fmt.Errorf("工具图片 %s 不是受支持的 PNG/JPEG 图片", source.FilePath)
+		}
+		width, height := decodeImageSize(mediaType, data)
+		if width <= 0 || height <= 0 {
+			os.Remove(source.FilePath)
+			return fmt.Errorf("工具图片 %s 没有有效的图像扫描数据", source.FilePath)
+		}
 		id, err := newImageID()
 		if err != nil {
 			return fmt.Errorf("生成图片 ID 失败: %w", err)
 		}
-		mediaType := source.MediaType
-		if mediaType == "" {
-			mediaType = "image/png"
-		}
-		ext := filepath.Ext(source.FilePath)
-		if ext == "" {
-			ext = ".png"
-		}
+		ext := mediaTypeToExt(mediaType)
 		filePath := filepath.Join(dir, id+ext)
 		if err := os.WriteFile(filePath, data, 0o600); err != nil {
 			return fmt.Errorf("写入工具图片失败: %w", err)
 		}
-		width, height := decodeImageSize(data)
 		image := domain.MessageImage{
 			ID:        id,
 			FilePath:  filePath,
@@ -368,10 +369,34 @@ func (agent *Agent) registerToolImages(result *domain.ToolResult, sessionID doma
 			return fmt.Errorf("登记工具图片失败: %w", err)
 		}
 		registered = append(registered, image)
-		_ = index
 	}
 	result.Images = registered
 	return nil
+}
+
+// sniffImageMediaType 以文件内容为准修正图片类型。
+//
+// 工具脚本可能把 JPEG 截图命名为 .png；供应商会校验 data URL 的 MIME，错标会被
+// 整张拒绝。这里认头不认扩展名；识别不出就返回空。
+func sniffImageMediaType(declared, path string, data []byte) string {
+	_ = declared
+	_ = path
+	switch {
+	case bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")):
+		return "image/png"
+	case bytes.HasPrefix(data, []byte("\xff\xd8\xff")):
+		return "image/jpeg"
+	default:
+		return ""
+	}
+}
+
+// mediaTypeToExt 把受支持的图片 MIME 映射成存储扩展名。
+func mediaTypeToExt(mediaType string) string {
+	if mediaType == "image/jpeg" {
+		return ".jpg"
+	}
+	return ".png"
 }
 
 // extractImageMarkers 从工具输出中提取 [goseek-image:路径] 标记，
@@ -428,7 +453,8 @@ func newImageID() (string, error) {
 
 // decodeImageSize 用标准库解析 PNG/JPEG/GIF 头部拿像素尺寸。
 // 解析失败返回 0，只影响 token 估算精度，不阻塞图片展示。
-func decodeImageSize(data []byte) (int, int) {
+func decodeImageSize(mediaType string, data []byte) (int, int) {
+	_ = mediaType
 	config, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return 0, 0

@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -794,5 +797,87 @@ func TestRunningSessionsEndpointAndSnapshotState(t *testing.T) {
 	}
 	if idle.RunState != "" && idle.RunState != domain.StateIdle {
 		t.Fatalf("结束后的 run_state = %q，要空或 IDLE", idle.RunState)
+	}
+}
+
+// TestGetSessionFileBinaryAndMissing 钉住文件查看端点的两类结构化响应：
+//
+//  1. zip 等二进制文件返回 binary=true（前端显示文件卡片而不是乱码）；
+//  2. 不存在的文件返回 404 + not_found + abs_path（前端仍能给出"在文件管理器
+//     中定位"的入口——文件可能稍后由工具生成，或用户想去目录看看）。
+func TestGetSessionFileBinaryAndMissing(t *testing.T) {
+	ts := newTestServer(t, nil)
+	sessionID := ts.createSession(t)
+
+	// workspace 之外的写法不可用——createSession 固定 /tmp，直接写 /tmp 下。
+	binPath := filepath.Join(t.TempDir(), "unused")
+	_ = binPath
+	zipAbs := "/tmp/goseek-fileview-test.zip"
+	if err := os.WriteFile(zipAbs, []byte{0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0x00}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(zipAbs)
+
+	// createSession 的 workspace 是 /tmp；zip 放在 /tmp 根下即可作为相对路径访问。
+	status, body := ts.do(t, http.MethodGet,
+		"/api/v1/sessions/"+sessionID+"/file?path="+neturl.QueryEscape("goseek-fileview-test.zip"), "")
+	if status != http.StatusOK {
+		t.Fatalf("二进制文件返回 %d: %s", status, body)
+	}
+	var bin struct {
+		Binary bool `json:"binary"`
+	}
+	if err := json.Unmarshal(body, &bin); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if !bin.Binary {
+		t.Fatalf("zip 文件未被判为二进制: %s", body)
+	}
+
+	// 不存在的文件：404 + 结构化字段。
+	status, body = ts.do(t, http.MethodGet,
+		"/api/v1/sessions/"+sessionID+"/file?path=definitely-missing.txt", "")
+	if status != http.StatusNotFound {
+		t.Fatalf("缺失文件返回 %d", status)
+	}
+	var missing struct {
+		NotFound bool   `json:"not_found"`
+		AbsPath  string `json:"abs_path"`
+	}
+	if err := json.Unmarshal(body, &missing); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if !missing.NotFound || missing.AbsPath == "" {
+		t.Fatalf("缺失文件的响应缺 not_found 或 abs_path: %s", body)
+	}
+}
+
+// 文本文件按结构化载荷返回：binary=false + content，侧栏据此做代码/Markdown
+// 格式化视图；这里是 ts/go/md 一类文件的契约。
+func TestGetSessionFileTextPayload(t *testing.T) {
+	ts := newTestServer(t, nil)
+	sessionID := ts.createSession(t)
+
+	path := "/tmp/goseek-fileview-test.txt"
+	if err := os.WriteFile(path, []byte("const ready = true;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+
+	status, body := ts.do(t, http.MethodGet,
+		"/api/v1/sessions/"+sessionID+"/file?path="+neturl.QueryEscape("goseek-fileview-test.txt"), "")
+	if status != http.StatusOK {
+		t.Fatalf("文本文件返回 %d: %s", status, body)
+	}
+	var payload struct {
+		Binary  bool   `json:"binary"`
+		AbsPath string `json:"abs_path"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if payload.Binary || payload.Content == "" || payload.AbsPath == "" {
+		t.Fatalf("文本文件载荷不完整: %s", body)
 	}
 }

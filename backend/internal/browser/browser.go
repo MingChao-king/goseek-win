@@ -209,7 +209,7 @@ func (br *Browser) Screenshot() ([]byte, string, error) {
 	defer br.viewportMu.Unlock()
 	// 空浏览器实例：返回空帧而不是挂住。
 	if info, infoErr := page.Info(); infoErr != nil || info == nil {
-		return []byte{0xFF, 0xD8, 0xFF, 0xD9}, "about:blank", nil
+		return nil, "about:blank", errors.New("浏览器没有打开页面")
 	}
 	// 视口截图（全页=false），高 JPEG 质量让 Retina 屏上文字可读。
 	quality := streamJPEGQuality

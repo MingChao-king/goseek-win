@@ -6,6 +6,7 @@
 import type {
   MemoryTree, ModelInfo, RunningSession, SessionSnapshot, SessionSummary,
 } from "./types";
+import type { FilePayload } from "./FileView";
 
 /** ApiFailure 是一次失败的请求。 */
 export class ApiFailure extends Error {
@@ -126,6 +127,42 @@ export function getDefaultWorkspace(): Promise<{ path: string }> {
 /** getSession 取回一个会话的完整快照。 */
 export function getSession(id: string): Promise<SessionSnapshot> {
   return request(`/api/v1/sessions/${id}`);
+}
+
+/**
+ * fetchSessionFile 取一个侧栏文件的结构化载荷。
+ *
+ * 与旧版返回裸文本不同：这里区分"可预览文本 / 二进制 / 不存在"三种情形，
+ * 并带回绝对路径——文件卡片要靠它提供"在文件管理器中显示"。
+ * 404（文件不存在）在这里归一化为载荷返回：调用方拿 abs_path 渲染卡片，
+ * 而不是抛异常丢掉定位入口。所以这一处不走 request()——request 会把
+ * 非 2xx 一律翻译成异常，而这里 404 是正常结果。
+ */
+export async function fetchSessionFile(id: string, path: string): Promise<FilePayload> {
+  const response = await fetch(`/api/v1/sessions/${id}/file?path=${encodeURIComponent(path)}`, {
+    headers: { "Content-Type": "application/json" },
+  });
+  if (response.status === 404) {
+    // 404 的响应体本身就是 FilePayload（not_found + abs_path）；解析失败再抛。
+    try {
+      return (await response.json()) as FilePayload;
+    } catch {
+      throw new ApiFailure("file_not_found", "文件不存在");
+    }
+  }
+  if (!response.ok) {
+    throw new ApiFailure("http_" + response.status, `读取文件失败（HTTP ${response.status}）`);
+  }
+  return (await response.json()) as FilePayload;
+}
+
+/** revealFile 让系统文件管理器定位并选中 workspace 内的一个文件。 */
+export function revealFile(id: string, path: string): Promise<{ ok: boolean }> {
+  return request(`/api/v1/sessions/${id}/reveal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
 }
 
 /**

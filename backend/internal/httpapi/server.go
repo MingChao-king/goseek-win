@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,15 +10,19 @@ import (
 	"io/fs"
 	"log/slog"
 	"math/rand"
+	"mime/multipart"
 	"net/http"
 	neturl "net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"goseek/internal/browser"
 	"goseek/internal/contextmgr"
@@ -127,6 +132,7 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/models", server.listModels)
 	mux.HandleFunc("GET /api/v1/workspace/default", server.defaultWorkspaceHandler)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/file", server.getSessionFile)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/reveal", server.revealFile)
 	mux.HandleFunc("GET /api/v1/browser/stream", server.browserStream)
 	mux.HandleFunc("POST /api/v1/browser/click", server.browserClick)
 	mux.HandleFunc("POST /api/v1/browser/scroll", server.browserScroll)
@@ -202,26 +208,34 @@ func (server *Server) getSessionFile(writer http.ResponseWriter, request *http.R
 		writeError(writer, http.StatusBadRequest, "missing_path", "缺少 path 参数")
 		return
 	}
-	workspace := runner.session.Workspace
-	absPath := filepath.Join(workspace, relPath)
-	// 防路径穿越：解析后的绝对路径必须在 workspace 之内。
-	absWorkspace, err := filepath.Abs(workspace)
-	if err != nil {
-		server.writeInternal(writer, "解析工作目录失败", err)
-		return
-	}
-	absPath, err = filepath.Abs(absPath)
-	if err != nil || !strings.HasPrefix(absPath, absWorkspace+string(filepath.Separator)) {
+	// 防路径穿越 + 符号链接归一：/tmp 是 /private/tmp 的别名，对话里的 file://
+	// 链接与 workspace 可能各用一种形式，字符串前缀比较会误判。
+	absPath, ok := resolveWithinWorkspace(runner.session.Workspace, relPath)
+	if !ok {
 		writeError(writer, http.StatusForbidden, "path_outside_workspace", "路径超出工作目录范围")
 		return
 	}
 	info, err := os.Stat(absPath)
 	if err != nil || info.IsDir() {
-		writeError(writer, http.StatusNotFound, "file_not_found", "文件不存在或是目录")
+		// 文件不存在也返回结构化信息：侧栏据此显示文件卡片（绝对路径 +
+		// 在文件管理器中定位），而不是一句干巴巴的 Not Found。
+		writeJSON(writer, http.StatusNotFound, fileViewPayload{
+			Path:     relPath,
+			AbsPath:  absPath,
+			NotFound: true,
+			Size:     -1,
+		})
 		return
 	}
-	if info.Size() > 1024*1024 {
-		writeError(writer, http.StatusRequestEntityTooLarge, "file_too_large", "文件超过 1 MB，请用终端查看")
+	if info.Size() > maxSidecarFileSize {
+		// 超限文件不读进内存，按"无法预览"给出：卡片 + 定位按钮比一句报错有用。
+		writeJSON(writer, http.StatusOK, fileViewPayload{
+			Path:       relPath,
+			AbsPath:    absPath,
+			Binary:     true,
+			Size:       info.Size(),
+			ModifiedAt: info.ModTime(),
+		})
 		return
 	}
 	data, err := os.ReadFile(absPath)
@@ -229,10 +243,144 @@ func (server *Server) getSessionFile(writer http.ResponseWriter, request *http.R
 		server.writeInternal(writer, "读取文件失败", err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"path":    relPath,
-		"content": string(data),
-	})
+	// 二进制内容（zip、图片等）不作为文本给出：UTF-8 解码失败或带 NUL 即判二进制。
+	// 前端对这类文件展示文件卡片而不是一堆乱码；content 也不发——几 MB 的乱码
+	// 只会浪费一次序列化和传输。
+	binary := !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0
+	payload := fileViewPayload{
+		Path:       relPath,
+		AbsPath:    absPath,
+		Binary:     binary,
+		Size:       info.Size(),
+		ModifiedAt: info.ModTime(),
+	}
+	if !binary {
+		payload.Content = string(data)
+	}
+	writeJSON(writer, http.StatusOK, payload)
+}
+
+// resolveWithinWorkspace 把用户给的路径（相对或绝对）解析成 workspace 内的
+// 绝对路径；越界返回 false。
+//
+// 为什么不能只做字符串前缀比较：macOS 上 /tmp 是 /private/tmp 的符号链接。
+// 对话里的 file:// 链接是用户眼里的 /tmp/... 形式，而服务进程的工作目录是
+// /private/tmp/... 形式——同一份文件两种写法，前缀一比就成了"越界"。
+// 所以两边都先做符号链接归一化再比较；目标文件可能还不存在（not_found 场景），
+// 此时对最近一个已存在的祖先目录做解析，文件名部分原样拼回。
+func resolveWithinWorkspace(workspace, raw string) (string, bool) {
+	absWorkspace, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", false
+	}
+	var target string
+	if filepath.IsAbs(raw) {
+		target = filepath.Clean(raw)
+	} else {
+		target = filepath.Join(absWorkspace, raw)
+	}
+	resolvedWorkspace := resolveSymlinksBestEffort(absWorkspace)
+	resolvedTarget := resolveSymlinksBestEffort(target)
+	if resolvedTarget == resolvedWorkspace ||
+		strings.HasPrefix(resolvedTarget, resolvedWorkspace+string(filepath.Separator)) {
+		return resolvedTarget, true
+	}
+	// 兜底：符号链接解析整体失效（极端挂载情形）时退回字符串比较，
+	// 至少不放过普通的 ../ 穿越——Abs+Clean 已经消掉了它们。
+	if strings.HasPrefix(target, absWorkspace+string(filepath.Separator)) {
+		return target, true
+	}
+	return "", false
+}
+
+// resolveSymlinksBestEffort 解析路径中的符号链接；路径本身不存在时对最近的
+// 已存在祖先解析，剩余部分原样拼回。
+func resolveSymlinksBestEffort(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	dir := filepath.Dir(path)
+	for {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(resolved, filepath.Base(path))
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return path
+		}
+		dir = parent
+	}
+}
+
+// maxSidecarFileSize 是侧栏文件查看的文本大小上限（1 MB）。
+// 超过它的文件不读进内存，前端显示文件卡片（在文件管理器中打开）。
+const maxSidecarFileSize = 1 << 20
+
+// fileViewPayload 是 GET /sessions/{id}/file 的响应体。
+type fileViewPayload struct {
+	Path    string `json:"path"`
+	AbsPath string `json:"abs_path"`
+	// Binary 表示这是无法作为文本预览的文件（zip、图片、超限……）。
+	// 前端据此显示文件卡片：在文件管理器中定位 / 复制路径。
+	Binary bool `json:"binary"`
+	// Size 是文件字节数；-1 表示文件不存在。
+	Size       int64     `json:"size"`
+	ModifiedAt time.Time `json:"modified_at,omitempty"`
+	// NotFound 表示请求的文件当前不存在（可能已被删除或还没生成）。
+	NotFound bool   `json:"not_found,omitempty"`
+	Content  string `json:"content,omitempty"`
+}
+
+// revealRequest 是 POST /sessions/{id}/reveal 的请求体。
+type revealRequest struct {
+	Path string `json:"path"`
+}
+
+// revealFile 在系统文件管理器中定位 workspace 内的一个文件：
+// macOS 用 open -R（Finder 中显示并选中），Windows 用 explorer /select，
+// Linux 用 xdg-open 打开所在目录。
+//
+// 与 bash 工具的差别不在能力而在语义：这不是给模型的命令，是给用户的按钮。
+// 因此这里只允许定位 workspace 内的路径、只允许三个白名单命令，不接受任何
+// 参数拼接——路径穿越由 Abs+HasPrefix 挡住，命令注入由"路径永远作为独立 argv
+// 传递"挡住（exec.Command 的参数不经 shell 解析）。
+func (server *Server) revealFile(writer http.ResponseWriter, request *http.Request) {
+	sessionID := domain.SessionID(request.PathValue("id"))
+	runner, err := server.runnerFor(sessionID)
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "session_not_found", "会话不存在")
+		return
+	}
+	var body revealRequest
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil || strings.TrimSpace(body.Path) == "" {
+		writeError(writer, http.StatusBadRequest, "invalid_body", "请求体缺少 path")
+		return
+	}
+	absPath, ok := resolveWithinWorkspace(runner.session.Workspace, body.Path)
+	if !ok {
+		writeError(writer, http.StatusForbidden, "path_outside_workspace", "路径超出工作目录范围")
+		return
+	}
+
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		command = exec.Command("open", "-R", absPath)
+	case "windows":
+		// explorer /select 要求反斜杠路径；explorer.exe 的退出码经常非 0，不视为失败。
+		command = exec.Command("explorer", "/select,", filepath.FromSlash(absPath))
+	default:
+		command = exec.Command("xdg-open", filepath.Dir(absPath))
+	}
+	command.Stdout = nil
+	command.Stderr = nil
+	if err := command.Start(); err != nil {
+		server.writeInternal(writer, "打开文件管理器失败", err)
+		return
+	}
+	// 不等窗口关闭——explorer/open 会挂住直到用户手动关闭。进程交给系统回收。
+	go func() { _ = command.Wait() }()
+	writeJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // getIsolatedBrowser 返回指定会话独立的隔离浏览器实例（懒创建）。
@@ -1598,6 +1746,14 @@ func (server *Server) uploadImage(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	mediaType := header.Header.Get("Content-Type")
+	// 浏览器和截图脚本都可能给出错误 MIME；供应商校验的是实际字节。
+	// 以内容为准修正声明，认不出的直接拒绝。
+	if sniffed := sniffUploadImageType(mediaType, file); sniffed == "" {
+		writeError(writer, http.StatusBadRequest, "unsupported_type", "图片内容不是有效的 PNG / JPEG")
+		return
+	} else {
+		mediaType = sniffed
+	}
 	if !isAllowedImageType(mediaType) {
 		writeError(writer, http.StatusBadRequest, "unsupported_type", "仅支持 PNG / JPEG / WebP")
 		return
@@ -1643,6 +1799,27 @@ func (server *Server) uploadImage(writer http.ResponseWriter, request *http.Requ
 		"width":      width,
 		"height":     height,
 	})
+}
+
+// sniffUploadImageType 读取文件开头，以真实字节识别 PNG/JPEG。
+func sniffUploadImageType(declared string, file multipart.File) string {
+	head := make([]byte, 12)
+	if _, err := io.ReadFull(file, head); err != nil {
+		return ""
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return ""
+	}
+	switch {
+	case bytes.HasPrefix(head, []byte("\x89PNG\r\n\x1a\n")):
+		return "image/png"
+	case bytes.HasPrefix(head, []byte("\xff\xd8\xff")):
+		return "image/jpeg"
+	case bytes.HasPrefix(head, []byte("RIFF")) && bytes.Equal(head[8:12], []byte("WEBP")):
+		return "image/webp"
+	default:
+		return ""
+	}
 }
 
 // getImage 按 ID 提供图片文件的本地受控服务。
@@ -2194,18 +2371,9 @@ func (server *Server) browserScreenshot(writer http.ResponseWriter, request *htt
 		writer.Header().Set("Content-Type", "image/jpeg")
 		writer.Write(r.data)
 	case <-time.After(3 * time.Second):
-		// 返回一个 1x1 白色像素 jpeg，前端照常渲染。
-		writer.Header().Set("Content-Type", "image/jpeg")
-		writer.Write([]byte{
-			0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
-			0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43,
-			0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09,
-			0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12,
-			0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20,
-			0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29,
-			0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32,
-			0x30, 0x33, 0xFF, 0xD9,
-		})
+		// 假图会让前端看起来“截图成功了”，更危险的是它可能被后续自动化流程
+		// 当作工具产出保存下来。超时必须作为明确失败交给调用方。
+		writeError(writer, http.StatusServiceUnavailable, "screenshot_timeout", "浏览器截图超时")
 	}
 }
 

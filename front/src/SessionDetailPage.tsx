@@ -20,10 +20,11 @@ import {
   browserPressKey,
   browserScroll, browserSetViewport, browserStreamURL, browserTabs,
   cancelTurn, compactSession, editMemory, getMemory,
-  getSession, listModels, listSkills, submitTurn, updateSession, type BrowserTab,
+  fetchSessionFile, getSession, listModels, listSkills, submitTurn, updateSession, type BrowserTab,
   type SidebarContextItem,
 } from "./api";
 import { Composer } from "./Composer";
+import { FileView, missingFilePayload, type FilePayload } from "./FileView";
 import { Icon } from "./Icon";
 import { isAtBottom, shouldFollow } from "./scroll";
 import { helpText, parseInput } from "./commands";
@@ -46,7 +47,10 @@ export function SessionDetailPage() {
   // activityOpen 控制右侧活动面板的展开/收起。
   const [activityOpen, setActivityOpen] = useState(false);
   // openFiles 是侧栏同时展开的文件（path → content），并列展示。
-  const [openFiles, setOpenFiles] = useState<Record<string, string>>({});
+  // path → 载荷；null 表示正在加载。
+  const [openFiles, setOpenFiles] = useState<Record<string, FilePayload | null>>({});
+  // activeFile 是希望活动面板显示的文件；ActivitySidebar 挂载后消费它。
+  const [activeFile, setActiveFile] = useState<string | null>(null);
   // activityOpen 控制右侧活动面板的展开/收起。
   // activityWidth 是活动侧栏宽度（px），可拖动左边框调整。
   const [activityWidth, setActivityWidth] = useState(480);
@@ -57,6 +61,7 @@ export function SessionDetailPage() {
     sidebarPagesRef.current = urls;
   }, []);
   const activitySidebarRef = useRef<HTMLElement | null>(null);
+
   const resizeStartRef = useRef<{
     pointerID: number;
     target: HTMLDivElement;
@@ -471,36 +476,52 @@ export function SessionDetailPage() {
   const openFileInSidebar = useCallback(async (rawPath: string) => {
     // file:// 链接可能是绝对路径（如 /Users/x/.../backend/src/x.go），
     // 也可能是 workspace 相对路径。统一转成 workspace 相对路径。
+    // macOS 的 /tmp 与 /private/tmp 是同一目录的两个名字，字符串前缀比较会把
+    // 它们当成不同目录——按"路径末段逐段匹配"的宽松规则截掉 workspace 前缀。
     let relPath = rawPath;
-    const workspace = state.workspace;
+    const workspace = state.workspace.replace(/\/+$/, "");
     if (workspace && rawPath.startsWith(workspace)) {
       relPath = rawPath.slice(workspace.length);
+    } else if (workspace) {
+      const rawSegments = rawPath.split("/").filter(Boolean);
+      const workspaceSegments = workspace.split("/").filter(Boolean);
+      let matched = 0;
+      while (
+        matched < workspaceSegments.length &&
+        rawSegments[matched] === workspaceSegments[matched]
+      ) {
+        matched++;
+      }
+      if (matched === workspaceSegments.length && matched > 0) {
+        relPath = rawSegments.slice(matched).join("/");
+      }
     }
     // file:///xxx 截断后是 /xxx（带前导斜杠），write_file 的 path 是 xxx——统一去掉。
     relPath = relPath.replace(/^\/+/, "");
     setActivityOpen(true);
     // 已展开就收起（toggle）。
-    if (openFiles[relPath] !== undefined) {
-      setOpenFiles((files) => {
-        const next = { ...files };
-        delete next[relPath];
-        return next;
-      });
-      return;
-    }
+    setActiveFile(relPath);
+    if (openFiles[relPath] !== undefined) return;
     try {
-      const res = await fetch(`/api/v1/sessions/${id}/file?path=${encodeURIComponent(relPath)}`);
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setOpenFiles((files) => ({ ...files, [relPath]: `无法读取文件：${body.message ?? res.statusText}` }));
-        return;
-      }
-      const body = await res.json();
-      setOpenFiles((files) => ({ ...files, [body.path]: body.content }));
+      const payload = await fetchSessionFile(id, relPath);
+      setOpenFiles((files) => ({ ...files, [relPath]: payload }));
     } catch (e) {
-      setOpenFiles((files) => ({ ...files, [relPath]: `加载失败：${e}` }));
+      // 加载失败（服务暂时不可达等）也给一张最小卡片：绝对路径推断不出来，
+      // 用 workspace 拼一个近似值，定位按钮至少能带到目录。
+      const fallback = `${state.workspace.replace(/\/+$/, "")}/${relPath}`;
+      setOpenFiles((files) => ({
+        ...files,
+        [relPath]: missingFilePayload(relPath, fallback),
+      }));
+      void e;
     }
   }, [id, state.workspace, openFiles, setActivityOpen]);
+
+  // 换会话时清空文件 tab：侧栏文件属于当前会话，不应该跨会话残留。
+  useEffect(() => {
+    setOpenFiles({});
+    setActiveFile(null);
+  }, [id]);
 
   // 活动面板数据：浏览器操作（goseek-browser 命令）和它产出的截图。
   const activeIDs = new Set(state.memory.active_batches.map((batch) => batch.id));
@@ -614,6 +635,7 @@ export function SessionDetailPage() {
               sessionID={id}
               onTabsUpdate={updateSidebarPages}
               openFiles={openFiles}
+              activeFile={activeFile}
               width={activityWidth}
               onActivityOpen={() => setActivityOpen(true)}
               onCloseFile={(path) => {
@@ -665,22 +687,65 @@ export function SessionDetailPage() {
           <ContextGauge usage={state.usage} />
         </div>
         {state.changedFiles.length > 0 && (
-          <div className="changed-files">
-            <div className="changed-files-header">本轮改动</div>
-            {state.changedFiles.map((path) => (
-              <button
-                key={path}
-                type="button"
-                className="changed-file"
-                title={`在侧栏打开 ${path}`}
-                onClick={() => void openFileInSidebar(path)}
-              >
-                {path}
-              </button>
-            ))}
-          </div>
+          <ChangedFiles files={state.changedFiles} onOpen={(path) => void openFileInSidebar(path)} />
         )}
       </footer>
+    </div>
+  );
+}
+
+/** summarizePath 把长路径压成「首段…文件名」，避免长列表把输入区撑乱。 */
+function summarizePath(path: string): string {
+  const segments = path.split("/").filter(Boolean);
+  const name = segments.at(-1) ?? path;
+  if (segments.length <= 2) return path;
+  const extIndex = name.lastIndexOf(".");
+  const stem = extIndex > 0 ? name.slice(0, extIndex) : name;
+  const ext = extIndex > 0 ? name.slice(extIndex) : "";
+  return `${segments[0]}…/${stem}${ext}`;
+}
+
+/** ChangedFiles 把本轮改动展示成可展开的紧凑芯片组。 */
+function ChangedFiles({ files, onOpen }: { files: string[]; onOpen: (path: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const latest = files.at(-1);
+  const latestName = latest?.split("/").pop() || latest;
+
+  return (
+    <div className="changed-files">
+      <button
+        type="button"
+        className="changed-files-head"
+        aria-expanded={expanded}
+        title={expanded ? "收起本轮改动" : "展开本轮改动"}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <Icon name="pulse" size={13} />
+        <span>本轮改动</span>
+        <span className="changed-count">{files.length}</span>
+        {latestName && <span className="changed-latest">{latestName}</span>}
+        <Icon name={expanded ? "chevronDown" : "chevronRight"} size={12} />
+      </button>
+      {expanded && (
+        <div className="changed-chips">
+          {files.map((path) => {
+          const name = path.split("/").pop() || path;
+          return (
+            <button
+              key={path}
+              type="button"
+              className="changed-chip"
+              title={`${path} · 在侧栏打开`}
+              onClick={() => onOpen(path)}
+            >
+              <Icon name="file" size={12} />
+              <span className="changed-chip-name">{name}</span>
+              <span className="changed-chip-dir">{summarizePath(path)}</span>
+            </button>
+          );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -1034,12 +1099,13 @@ function formatElapsed(seconds: number): string {
 
 /** ActivitySidebar：右侧活动面板——页面栈 + tab 栏，覆盖整个侧栏。 */
 function ActivitySidebar({
-  sidebarRef, sessionID, openFiles, width, onCloseFile, onClose, onActivityOpen,
+  sidebarRef, sessionID, openFiles, activeFile, width, onCloseFile, onClose, onActivityOpen,
   onTabsUpdate, onError,
 }: {
   sidebarRef: React.RefObject<HTMLElement | null>;
   sessionID: string;
-  openFiles: Record<string, string>;
+  openFiles: Record<string, FilePayload | null>;
+  activeFile: string | null;
   width: number;
   onCloseFile: (path: string) => void;
   onClose: () => void;
@@ -1065,6 +1131,14 @@ function ActivitySidebar({
   // 当前激活的 tab（默认最后一个）。
   const [activeKey, setActiveKey] = useState<string>("");
   const current = allTabs.find((t) => t.key === activeKey) ?? allTabs[allTabs.length - 1] ?? null;
+  const activeFileTabKey = activeFile
+    ? allTabs.find((tab) => tab.kind === "file" && tab.detail === activeFile)?.key
+    : undefined;
+
+  // 文件载荷可能晚于 activeFile 到达；tab 出现后再切过去。
+  useEffect(() => {
+    if (activeFileTabKey) setActiveKey(activeFileTabKey);
+  }, [activeFileTabKey]);
 
   const applyBrowserTabs = useCallback((tabs: BrowserTab[]) => {
     setBrowserPages(tabs);
@@ -1270,9 +1344,12 @@ function ActivitySidebar({
             title={current.title}
           />
         )}
-        {current?.kind === "file" && (
-          <pre className="activity-file-content">{openFiles[current.detail]}</pre>
-        )}
+        {current?.kind === "file" &&
+          (openFiles[current.detail] === null ? (
+            <div className="activity-empty">正在读取文件…</div>
+          ) : openFiles[current.detail] ? (
+            <FileView payload={openFiles[current.detail]!} sessionID={sessionID} />
+          ) : null)}
         {!current && (
           <div className="activity-empty">打开页面或文件后，这里会显示内容。</div>
         )}
