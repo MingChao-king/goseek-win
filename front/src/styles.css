@@ -219,10 +219,24 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 .session-item:hover { background: color-mix(in srgb, var(--bg-sink) 76%, transparent); }
 .session-item.current {
-  background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 16%, transparent);
+  /* 打开的会话要一眼可辨：纯白卡片从毛玻璃侧栏里浮起（暗色主题下 card 也比
+     背景亮一档），边框和阴影给足对比。accent-soft 和 bg 在 claude 主题下太近，
+     只靠背景色区分不开——真实踩过（见 session-current-dot）。 */
+  background: var(--card);
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--shadow) 72%, transparent);
 }
-.session-item.current::before { height: 60%; }
+.session-item.current::before { height: 72%; width: 4px; }
+.session-item.current .session-title { color: var(--accent-strong); font-weight: 650; }
+
+/* 当前会话标记点：标题前的实心圆，与运行状态点同一位置同一尺寸——
+   用户只需要认识一种"这个会话有情况"的语言。 */
+.session-current-dot {
+  flex: none; display: inline-block;
+  width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 0.4rem; vertical-align: 1px;
+  background: var(--accent);
+}
 
 /* ---- 侧栏"正在运行"提醒 -----------------------------------------------------
    多会话并行时用户最常见的误会是"我以为它跑完了"或"我不知道它还在跑"。
@@ -1052,7 +1066,25 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .code-block pre { margin: 0; padding: 0.65rem 0.8rem; overflow-x: auto; }
 .code-block code { background: none; padding: 0; font-size: 0.85rem; white-space: pre; }
 
-.table-scroll { overflow-x: auto; margin: 0.65rem 0; }
+.table-scroll {
+  position: relative; overflow-x: auto; margin: 0.65rem 0;
+  width: fit-content; max-width: 100%;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: color-mix(in srgb, var(--card) 72%, var(--bg-soft));
+}
+.table-scroll > .compact-copy {
+  position: absolute; top: 0.35rem; right: 0.35rem; z-index: 1;
+  width: 1.65rem; height: 1.65rem; padding: 0; justify-content: center;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--card);
+  color: var(--muted); opacity: 0; transition: opacity 0.12s ease, color 0.12s ease;
+}
+.table-scroll:hover > .compact-copy,
+.table-scroll:focus-within > .compact-copy,
+.table-scroll > .compact-copy:focus-visible { opacity: 1; }
+.table-scroll > .compact-copy:hover { color: var(--accent); border-color: var(--accent); }
+.compact-copy[title="已复制"] { color: var(--accent); }
+.markdown table { margin: 0; }
+.markdown table { width: 100%; }
 .markdown table { border-collapse: collapse; font-size: 0.9rem; }
 .markdown th, .markdown td {
   border: 1px solid var(--border); padding: 0.32rem 0.65rem; text-align: left;

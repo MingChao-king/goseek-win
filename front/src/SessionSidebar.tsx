@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
 import { deleteSession, listModels, listRunningSessions, listSessions, updateSession } from "./api";
 import { Icon } from "./Icon";
 import { loadTheme, saveTheme, themeNames, themeOrder, type Theme } from "./theme";
@@ -51,8 +51,13 @@ export function SessionSidebar() {
   /** 主题选择菜单是否展开。 */
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
-  // 当前打开的会话 id，从路由里取，用来高亮。
-  const { id: currentID } = useParams();
+  // 当前打开的会话 id，从地址栏解析，用来高亮。
+  //
+  // 侧栏挂在 <Routes> 外面（切换会话时不卸载、保留滚动位置），因此 useParams()
+  // 在这里拿不到路由参数——它返回的是空对象，"当前会话高亮"因此静默失效过。
+  // 正确做法是自己拿 pathname 去匹配 /sessions/:id 这个模式。
+  const { pathname } = useLocation();
+  const currentID = matchPath("/sessions/:id", pathname)?.params?.id;
   const navigate = useNavigate();
   // 正在运行的会话：id → 当前步骤。由下面的轮询维护，与列表合并出提醒。
   const [running, setRunning] = useState<Map<string, RunState>>(new Map());
@@ -316,11 +321,16 @@ export function SessionSidebar() {
                   className={`session-item${session.id === currentID ? " current" : ""}${
                     session.archived ? " archived" : ""
                   }${runState ? " session-running" : ""}`}
-                  aria-current={runState ? "true" : undefined}
+                  aria-current={session.id === currentID ? "page" : undefined}
                 >
                   <div className="session-title">
                     {runState && (
                       <span className={`session-running-dot step-${runState.toLowerCase()}`} aria-hidden="true" />
+                    )}
+                    {session.id === currentID && !runState && (
+                      // 当前会话的视觉锚点：多会话列表里一眼认出"我正看着这个"。
+                      // 运行中的会话由状态点承担这个职责，不重复放两个点。
+                      <span className="session-current-dot" aria-hidden="true" />
                     )}
                     {session.archived && <span className="archived-tag">已归档</span>}
                     {session.title}
