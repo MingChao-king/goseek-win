@@ -19,16 +19,17 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"syscall"
-	"unsafe"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/jchv/go-webview2"
+	"golang.org/x/sys/windows/registry"
 )
 
 const (
@@ -108,6 +109,17 @@ func waitReady(port int) bool {
 }
 
 func main() {
+	// 进程级 DPI 感知：没有这一句，Windows 在高 DPI 屏上按 96dpi 位图拉伸整个
+	// 窗口——文字发虚、布局偏小，是"界面粗糙"观感的最大单一来源。
+	// Per-Monitor V2（Win10 1703+）让多显示器缩放变化时也保持清晰。
+	// 常量取 -4：uintptr(^uintptr(3))，直接写负数字面量过不了类型检查。
+	// SetProcessDpiAwarenessContext（Win10 1703+）；更老系统上失败无害——
+	// 那种屏幕本来就是 96dpi，没有模糊问题。
+	user32instance := syscall.NewLazyDLL("user32.dll")
+	user32instance.NewProc("SetProcessDpiAwarenessContext").Call(
+		uintptr(^uintptr(3)), // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+	)
+
 	port := readPort()
 
 	goseekPath, err := findGoseek()
@@ -142,10 +154,48 @@ func main() {
 		reportFatal("WebView2 初始化失败：请通过 Windows 更新安装 Evergreen WebView2 Runtime")
 	}
 	defer w.Destroy()
+	// 窗口创建完成后把标题栏调成与系统主题一致（深色模式下才有动作）。
+	// WebView2 控件本身铺满客户区，窗口消息循环在 w.Run() 里，所以必须在此刻
+	// 拿到 hwnd 并立即应用——晚了就会被用户看到一次浅色标题栏的闪变。
+	if hwnd := w.Window(); hwnd != nil {
+		applyDarkTitleBarIfSystemDark(uintptr(hwnd))
+	}
 	w.Navigate(url)
 	w.Run()
 	// 窗口关闭：结束服务子进程（优雅退出交给 goseek 自己的信号处理）。
 	_ = server.Process.Kill()
+}
+
+// dwmDarkAttributes 依次尝试的 DWMWINDOWATTRIBUTE 值：
+// 20 = DWMWA_USE_IMMERSIVE_DARK_MODE（20H1+），19 = 早期 Win10 1903-2004 的编号。
+var dwmDarkAttributes = [2]uint32{20, 19}
+
+// applyDarkTitleBarIfSystemDark 依据系统"应用使用深色模式"的偏好，把指定窗口
+// 的标题栏调成深色。页面本身跟随系统主题（SPA 里 theme=system），标题栏跟它
+// 对齐，窗口整体才像一个真正的现代 Windows 应用。
+//
+// 注册表读不到（旧系统/精简系统）按浅色处理，不动标题栏。DwmSetWindowAttribute
+// 对不支持的属性返回非 0，两个候选值依次尝试，都失败则保持默认。
+func applyDarkTitleBarIfSystemDark(hwnd uintptr) {
+	k, err := registry.OpenKey(registry.CURRENT_USER,
+		`Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`, registry.QUERY_VALUE)
+	if err != nil {
+		return
+	}
+	defer k.Close()
+	val, _, err := k.GetIntegerValue("AppsUseLightTheme")
+	if err != nil || val != 0 {
+		return // 浅色模式或读不到：标题栏保持默认
+	}
+	dwmapi := syscall.NewLazyDLL("dwmapi.dll")
+	setAttr := dwmapi.NewProc("DwmSetWindowAttribute")
+	for _, attr := range dwmDarkAttributes {
+		value := uint32(1)
+		if ret, _, _ := setAttr.Call(hwnd, uintptr(attr),
+			uintptr(unsafe.Pointer(&value)), unsafe.Sizeof(value)); ret == 0 {
+			return
+		}
+	}
 }
 
 // reportFatal 弹一个原生消息框并退出。launcher 阶段还没有 WebView 可用。

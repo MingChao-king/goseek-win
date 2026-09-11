@@ -11,6 +11,7 @@
   --bg-soft: #f3f3f6;
   --bg-sink: #eaeaf0;
   --accent: #4f6ef7;
+  accent-color: var(--accent);
   --accent-strong: #3d5be0;
   --accent-soft: #e8edfe;
   --memory: #a98f45;
@@ -31,7 +32,7 @@
   --running-bg: #fbf2dd;
   --running-fg: #8a6714;
 
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-mono: "Cascadia Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
   font-size: 14px;
@@ -40,6 +41,7 @@
 
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; overflow: hidden; }
+html { background: var(--bg); } /* WebView2 默认白底：深色模式下避免加载闪白 */
 body {
   margin: 0; color: var(--fg); background: var(--bg);
   -webkit-font-smoothing: antialiased;
@@ -49,8 +51,15 @@ body {
 ::selection { background: var(--accent-soft); }
 
 * { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
-*::-webkit-scrollbar { width: 8px; height: 8px; }
-*::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 5px;
+  border: 2px solid transparent; background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+*::-webkit-scrollbar-thumb:active { background: var(--accent); }
+*::-webkit-scrollbar-corner { background: transparent; }
 *::-webkit-scrollbar-track { background: transparent; }
 
 /* ---- 基线控件 ----
@@ -513,7 +522,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .workspace {
   flex: 0 1 24rem; min-width: 0;
   color: var(--muted); font-size: 0.78rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: "Cascadia Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 32%;
   border-bottom: 1px dashed transparent; border-radius: 0;
   padding: 0.05rem 0.1rem;
@@ -722,7 +731,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   font-size: 0.85rem; color: var(--muted); cursor: pointer;
 }
 .tool-group-head:hover { background: var(--bg-sink); }
-.tool-group-caret { font-family: ui-monospace, monospace; color: var(--muted); }
+.tool-group-caret { font-family: "Cascadia Mono", ui-monospace, Consolas, monospace; color: var(--muted); }
 .tool-group-label { color: var(--fg); font-weight: 500; }
 .tool-group-body { border-top: 1px solid var(--border); padding: 0.45rem 0.65rem; }
 .tool-group-body .tool-card { border: none; border-radius: 0; margin: 0.3rem 0; box-shadow: none; }
@@ -845,10 +854,10 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 .memory-toggle:hover { background: none; color: inherit; }
 .memory-level {
-  font-family: ui-monospace, monospace; font-size: 0.73rem; font-weight: 600;
+  font-family: "Cascadia Mono", ui-monospace, Consolas, monospace; font-size: 0.73rem; font-weight: 600;
   padding: 0 0.3rem; border-radius: 4px; background: var(--memory-chip); color: #5c4d24;
 }
-.memory-range { font-family: ui-monospace, monospace; font-size: 0.75rem; color: var(--muted); }
+.memory-range { font-family: "Cascadia Mono", ui-monospace, Consolas, monospace; font-size: 0.75rem; color: var(--muted); }
 .memory-title {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-weight: 500;
@@ -979,12 +988,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .gauge-arc.gauge-danger { stroke: #c0392b; }
 .gauge-percent { font-size: 0.85rem; font-weight: 650; fill: var(--fg); }
 .gauge-detail { display: flex; flex-direction: column; line-height: 1.4; }
-.gauge-figure { font-family: ui-monospace, monospace; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.gauge-figure { font-family: "Cascadia Mono", ui-monospace, Consolas, monospace; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
 .gauge-text-ok { color: var(--accent); }
 .gauge-text-warn { color: #a8790f; }
 .gauge-text-danger { color: #a5281b; }
 .gauge-note { color: var(--muted); font-size: 0.78rem; }
-.gauge-flat { font-family: ui-monospace, monospace; font-size: 0.85rem; }
+.gauge-flat { font-family: "Cascadia Mono", ui-monospace, Consolas, monospace; font-size: 0.85rem; }
 
 /* 会话主区变窄时按信息优先级降级，按钮不允许被压成逐字竖排。 */
 @container (max-width: 820px) {
@@ -1060,7 +1069,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   font-size: 0.75rem; color: var(--muted); background: var(--card);
 }
 .code-lang {
-  font-family: ui-monospace, monospace; font-weight: 600;
+  font-family: "Cascadia Mono", ui-monospace, Consolas, monospace; font-weight: 600;
   padding: 0 0.4rem; border-radius: 4px; background: var(--bg-sink);
 }
 .code-block pre { margin: 0; padding: 0.65rem 0.8rem; overflow-x: auto; }
