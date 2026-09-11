@@ -132,7 +132,7 @@ type UserMessagePayload struct {
 
 // FileChangedPayload 保存一次文件变更的信息。
 type FileChangedPayload struct {
-	// Path 是相对于 workspace 的文件路径。
+	// Path 是模型传给 write_file 的原始路径（相对于 workspace 或绝对路径）。
 	Path string `json:"path"`
 	// TurnID 让前端把改动归到当前轮次。
 	TurnID string `json:"turn_id"`

@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"goseek/internal/domain"
 )
@@ -29,13 +28,13 @@ type readFileArgs struct {
 func (tool *ReadFileTool) Spec() domain.ToolSpec {
 	return domain.ToolSpec{
 		Name:        "read_file",
-		Description: "读取指定路径的文件内容，返回完整文本。路径相对于当前工作目录，必须是 workspace 内的文件。",
+		Description: "读取指定路径的文件内容，返回完整文本。路径相对于当前工作目录，或使用绝对路径。",
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
     "path": {
       "type": "string",
-      "description": "要读取的文件路径（相对于 workspace 或绝对路径）"
+      "description": "要读取的文件路径（相对于当前工作目录的路径或绝对路径）"
     }
   },
   "required": ["path"],
@@ -85,13 +84,13 @@ type writeFileArgs struct {
 func (tool *WriteFileTool) Spec() domain.ToolSpec {
 	return domain.ToolSpec{
 		Name:        "write_file",
-		Description: "写入指定路径的文件（全量覆盖），自动创建父目录。路径必须在 workspace 内。写入后如需确认可再用 read_file 或 bash 查看。",
+		Description: "写入指定路径的文件（全量覆盖），自动创建父目录。路径相对于当前工作目录，或使用绝对路径。写入后如需确认可再用 read_file 或 bash 查看。",
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
     "path": {
       "type": "string",
-      "description": "要写入的文件路径"
+      "description": "要写入的文件路径（相对于当前工作目录的路径或绝对路径）"
     },
     "content": {
       "type": "string",
@@ -134,7 +133,7 @@ func (tool *WriteFileTool) Run(ctx context.Context, call domain.ToolCall, onOutp
 	}, nil
 }
 
-// SearchTool 在 workspace 内做文本搜索（用 rg 子进程）。
+// SearchTool 在指定路径内做文本搜索（用 rg 子进程）。
 type SearchTool struct {
 	workspace string
 }
@@ -146,12 +145,13 @@ func NewSearch(workspace string) *SearchTool {
 type searchArgs struct {
 	Pattern string `json:"pattern"`
 	Glob    string `json:"glob,omitempty"`
+	Path    string `json:"path,omitempty"`
 }
 
 func (tool *SearchTool) Spec() domain.ToolSpec {
 	return domain.ToolSpec{
 		Name:        "search",
-		Description: "在 workspace 内做文本搜索。用正则表达式匹配，返回文件名、行号和匹配行。适用于查找代码、配置和文本中的特定内容。",
+		Description: "在指定路径内做文本搜索（缺省为当前工作目录）。用正则表达式匹配，返回文件名、行号和匹配行。适用于查找代码、配置和文本中的特定内容。",
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -162,6 +162,10 @@ func (tool *SearchTool) Spec() domain.ToolSpec {
     "glob": {
       "type": "string",
       "description": "可选的文件名过滤模式，如 *.go"
+    },
+    "path": {
+      "type": "string",
+      "description": "要搜索的路径（相对于当前工作目录的路径或绝对路径，缺省为当前工作目录）"
     }
   },
   "required": ["pattern"],
@@ -183,12 +187,16 @@ func (tool *SearchTool) Run(ctx context.Context, call domain.ToolCall, onOutput 
 	if err != nil {
 		return errorResult(err.Error()), nil
 	}
+	resolved, err := resolvePath(tool.workspace, args.Path)
+	if err != nil {
+		return errorResult(err.Error()), nil
+	}
 	// Build rg command.
 	argsList := []string{"--color=never", "--max-count=20"}
 	if args.Glob != "" {
 		argsList = append(argsList, "--glob", args.Glob)
 	}
-	argsList = append(argsList, args.Pattern, tool.workspace)
+	argsList = append(argsList, args.Pattern, resolved)
 	cmd := exec.Command("rg", argsList...)
 	cmd.Dir = tool.workspace
 	var out bytes.Buffer
@@ -204,20 +212,12 @@ func (tool *SearchTool) Run(ctx context.Context, call domain.ToolCall, onOutput 
 	return domain.ToolResult{Status: domain.ToolSuccess, Content: out.String()}, nil
 }
 
-// resolvePath 把一个用户/模型给的路径限制到 workspace 内。
+// resolvePath 把路径解析成绝对路径：绝对路径原样使用，相对路径相对 workspace 解析。
 func resolvePath(workspace, path string) (string, error) {
 	if filepath.IsAbs(path) {
-		// Allow absolute paths inside workspace only.
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return "", err
-		}
-		if !strings.HasPrefix(abs, workspace+string(filepath.Separator)) && abs != workspace {
-			return "", fmt.Errorf("路径 %s 超出工作目录 %s 的范围", path, workspace)
-		}
-		return abs, nil
+		return filepath.Abs(path)
 	}
-	return filepath.Join(workspace, path), nil
+	return filepath.Abs(filepath.Join(workspace, path))
 }
 
 // errorResult 构造一条 error 状态的 ToolResult。

@@ -26,9 +26,10 @@ const systemPromptBase = `你是 GoSeek，一个运行在用户本机的编码�
 
 ## 文件操作
 
-读取文件用 read_file，写入文件用 write_file，文本搜索用 search。这些工具会校验路径
-边界，比 bash 的 cat / echo / grep 更安全。bash 用于运行命令、程序和管道，不用于
-读写单个文件。
+读取文件用 read_file，写入文件用 write_file，文本搜索用 search。read_file 和
+write_file 接受当前工作目录下的相对路径或绝对路径；search 默认搜索当前工作
+目录，也可用 path 参数搜索其他目录。bash 用于运行命令、程序和管道，不用于读写
+单个文件。
 
 ## Skill 系统
 
